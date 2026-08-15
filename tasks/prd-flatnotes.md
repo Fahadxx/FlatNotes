@@ -1,0 +1,98 @@
+# PRD - FlatNotes
+
+A Windows note-taking app blending Notability / GoodNotes (ink-first, beautiful pen feel) with OneNote (typed text, organization). Built web-first for iterative browser testing, packaged as a desktop app (Electron) at the end.
+
+## Design principles
+
+- **Minimal by default, deep on demand.** The default chrome is a single floating toolbar. Advanced options are one tap away (options popover per tool, settings panel for everything else). The minimal toolbar itself is customizable.
+- **Pen is a first-class citizen.** Surface Pen: pressure → stroke width, barrel/back-of-pen eraser → instant erase without switching tools, palm rejection (pen input wins over touch), low-latency ink via coalesced + predicted pointer events.
+- **Smooth.** 60fps pan/zoom, incremental rasterization of committed strokes, live layer for the active stroke only, no jank on large pages.
+- **Modern minimal UI.** Soft shadows, rounded floating panels, fluent-like acrylic feel, light/dark themes following system, subtle motion.
+
+## Architecture
+
+- Plain ES modules, zero build step. `app/index.html` + `app/css` + `app/js`.
+- Canvas stack per page view: background (paper template) → static ink (offscreen raster of committed strokes, redrawn on zoom) → live layer (active stroke, selection overlays).
+- World-coordinate stroke model: `{tool, color, size, opacity, points: [{x, y, p}]}`; view = pan (x,y) + zoom.
+- Stroke rendering: Catmull-Rom smoothing + pressure-mapped variable-width outline polygon with round caps (Notability-quality ink).
+- Undo/redo: command stack per page (add / remove / transform / text edits).
+- Persistence: IndexedDB, autosave (debounced), notebooks → pages.
+- Electron shell at the end (Node 22 available): frameless-ish window, app icon, portable exe via electron-builder.
+
+## User stories
+
+- US-001 App shell: canvas viewport, paper page (A4-ish, infinite-scroll pages downward), pan/zoom (wheel, ctrl+wheel, touch pinch, space-drag), floating toolbar skeleton, light/dark theme.
+- US-002 Ink engine: pen tool with pressure, coalesced events, smoothing, variable width; highlighter (translucent, flat width, multiply blend); ink commits to raster layer.
+- US-003 Eraser: stroke eraser + precise (point) eraser; **back-of-pen / barrel-button eraser auto-switch** (pointer `buttons & 32` / eraser pointerType) with auto-return to previous tool; palm rejection.
+- US-004 Undo/redo (buttons + Ctrl+Z/Y), tool options popovers: color swatches + custom color, size presets + slider, per-tool memory.
+- US-005 Paper templates: blank / lines / grid / dots, template + page color pickable per page; page management (add page, page indicator).
+- US-006 Persistence: IndexedDB autosave, notebooks & pages sidebar (collapsible), rename/delete, thumbnails.
+- US-007 Lasso select: hit-test strokes, move selection, delete, duplicate; marching-ants outline.
+- US-008 Text tool: click to place typed text boxes (OneNote flavor), edit, move, font size/color; shapes tool (line/rect/ellipse/arrow) with snap.
+- US-009 Customization: toolbar edit mode (toggle which tools show), accent color, toolbar density/position; settings panel with advanced options (pressure curve, smoothing amount, palm rejection toggle, eraser mode default).
+- US-010 Polish & perf: pinch zoom quality, cursor states, keyboard shortcuts, export page as PNG, empty states, animations.
+- US-011 Desktop app: Electron wrapper, window controls, icon, persisted window state, packaged portable .exe.
+- US-012 Textify (added post-v1): circle ink -> local OCR -> editable text item. GLM-OCR 0.9B Q8_0 on llama.cpp (CPU, win-arm64), spawned on demand by the Electron main process, unloaded after 10 idle minutes. Nemotron OCR v2 evaluated first per user preference (54-84 M params) but rejected: CUDA + Linux only, no CPU support.
+- US-013 Multi-model Textify: model registry in the Electron main process (GLM-OCR 0.9B, Gemma 4 E4B, Qwen3.5 4B, Qwen3.5 0.8B), picker in the Textify popover, per-model prompt, engine swap on selection change (stop, wait for the port to free, respawn), availability checked against the LM Studio cache. The renderer sanitizes model output (code fences, preambles, reasoning traces) and sends `enable_thinking: false` so reasoning models answer instead of thinking.
+- US-014 PDF export: export the current page or the whole notebook to a PDF, from the page-style / export area of the UI. Zero dependencies, so the PDF is written by hand: one JPEG per page embedded as a `DCTDecode` image XObject, page boxes sized from `PAGE_W` / `PAGE_H`, rendered at a quality setting (roughly 2x to 3x device scale). Raster rather than vector, matching the existing PNG export path. Must work identically in the browser (anchor download) and in the packaged desktop app. Progress feedback for multi-page notebooks so a 40 page export does not look frozen.
+- US-015 AI actions on a selection: the local engine from US-012/US-013 is already there and loaded on demand, so reuse it for more than transcription. Lasso a region, then pick an action from the selection bar:
+  - **Summarize**: condense the circled notes into a short text item placed beside them.
+  - **Solve**: read a handwritten arithmetic or algebra expression and append the result.
+  - **Translate**: transcribe and translate the circled text into a chosen language.
+  - **Tidy**: transcribe and rewrite as clean bullet points, for messy meeting notes.
+  Each action is one model call with its own prompt, reuses `ensureOcrEngine` / `renderOcrCrop` / `sanitizeOcrText`, is undoable in a single step, and never deletes the original ink (unlike Textify's replace option). Actions that need reasoning quality should note that the small OCR model is weaker at them than the general vision models, and say so in the UI.
+- US-016 Auto title: name an untitled notebook from the content of its first page using the same engine, offered rather than automatic.
+- US-017 Voice notes (speech to text): pick the voice tool, tap a spot on the page, and recording starts with a LIVE transcript appearing as you speak English. Tap stop to finish. The result is an ordinary text item, editable exactly like any other, undoable in one step. Recording state must be obvious (a visible indicator plus a level meter), cancellable without inserting anything, and must release the microphone on stop, cancel, tool switch, page switch and window close.
+  - Target engine: **NVIDIA Parakeet TDT 0.6B v2**, run locally. Feasibility on this machine (Windows on ARM64, CPU only, no CUDA) must be checked FIRST, since NVIDIA NeMo itself is CUDA and Linux oriented, which is exactly why Nemotron OCR v2 was rejected in US-012. Prefer an ONNX export driven by a runtime with a real win-arm64 CPU build (for example sherpa-onnx, which ships Parakeet TDT support and prebuilt binaries).
+  - Live transcript implies streaming or chunked decoding: feed short audio windows and update the in-progress text, rather than waiting for the whole utterance.
+  - Fallbacks if Parakeet cannot run here, in order of preference: whisper.cpp (has win-arm64 CPU builds), then the audio input path of the llama.cpp server we already ship (the Gemma 4 E4B load log reports an experimental audio encoder). Whatever is chosen must stay fully local and load on demand, matching the US-013 engine lifecycle (spawn on first use, unload when idle).
+  - Browser mode has no way to spawn an engine, so it should degrade honestly with a clear message rather than silently failing.
+- US-018 Updates preserve Windows pins: our own code all lives in `resources\app.asar`, so a routine update repacks and replaces only that file and never touches `FlatNotes.exe`. Replacing the exe (as a full `robocopy /MIR` reinstall does) destroys Start and taskbar pins, because a pin references that exact file. `scripts/update-app.ps1` does the asar-only update and keeps a `.bak` for rollback. `app.setAppUserModelId` matches `build.appId` so Windows groups the running window with the pinned shortcut. A full reinstall is only needed when the Electron runtime itself changes.
+- US-019 Black paper with automatic colour inversion: a fourth paper colour, pure black (`#000000`), drawn with a subtle light border so the page edge stays visible against the app background. On black paper everything else inverts automatically at render time: near-black ink, text, shapes and template lines become near-white, near-white content becomes near-black, and **chromatic colours (red, blue, yellow and so on) are left exactly as they are**. Highlighter is included. The inversion is a display transform only and never rewrites stored item colours, so switching the paper back restores the original appearance exactly. It must apply everywhere a page is drawn: the page raster cache, the live stroke and selection overlay, sidebar thumbnails, PNG export and PDF export.
+- US-020 Image items: a fourth item type (`type: 'image'`) so pages can hold bitmaps. Needed in its own right and a hard prerequisite for US-021, since OneNote pages are full of images. Must draw in the page raster cache, hit-test for lasso and eraser (whole item, like text and shapes), move and resize with aspect preserved, persist in IndexedDB, survive undo/redo, and appear in thumbnails, PNG export and PDF export. Stored as an encoded blob or data URL rather than raw pixels, decoded once into an `ImageBitmap` cached like `pathCache` so bake stays fast. On black paper (US-019) images are left alone: photographs are chromatic content, not ink.
+- US-021 OneNote import: bring every notebook, section and page across from the locally installed OneNote, so the user can leave the Microsoft ecosystem without losing years of handwriting.
+  - **Route**: the OneNote desktop COM automation interface (`OneNote.Application`), driven locally. No Microsoft Graph, no Azure app registration, no account round trip. Graph flattens ink to images; COM exposes the page XML. Confirmed present on this machine.
+  - **Scripting is not an option on this machine.** `CreateObject("OneNote.Application")` succeeds from cscript but every subsequent call fails `0x8002801D TYPE_E_LIBNOTREGISTERED`: the typelib key has only a `Win32` subkey while Office is ClickToRun x64. The importer must use a compiled .NET helper built with the in-box `csc.exe` against the `Microsoft.Office.Interop.OneNote` PIA already in the GAC, which is early bound and never loads the typelib. No registry changes.
+  - **Ink is vector, proven.** `one:InkDrawing/one:Data` is base64 ISF, and the in-box `System.Windows.Ink.StrokeCollection` parsed **19,731 of 19,731 blobs with zero failures**, giving 19,757 strokes and 1,770,250 points with x, y, pressure, ARGB colour, width and flags. No raster fallback is needed for ink.
+  - **Coordinates**: ISF points are page-global in 96 dpi pixels; multiply by 0.75 to get OneNote points. Verified against `one:Position` across 60 drawings, median residual 0.142 pt.
+  - **Highlighter detection**: `IsHighlighter` is false on all 19,757 strokes, so it is useless here. Highlighter is encoded as **alpha below 255 in the stroke colour** (for example `#80FFFC00`). Map alpha < 255 to the highlighter tool, and carry alpha into opacity.
+  - **Pressure** varies across the corpus but is flat 0.5 on pages drawn without a pressure-reporting device. Map it straight into the existing `p` field either way.
+  - **Scale of the real data**: 4 notebooks, 38 sections, 225 pages (224 local `.one` files, 1 on OneDrive), 99,098 ink drawings on 133 pages, 566 images on 65 pages (82% PNG, 18% JPEG, 0.4% EMF), 33 tables.
+  - **Page geometry is the hard problem.** Every OneNote page is `Automatic` size, and measured content reaches x = 1388.5 pt (2.26x wider than `PAGE_W`) and y = 42,261 pt (about 48 FlatNotes pages tall). Resolution: scale each page uniformly by `min(1, PAGE_W / contentWidth)` so most pages import at true size and only genuinely wide ones shrink, then slice vertically into as many FlatNotes pages as the height needs. Items straddling a slice boundary are assigned to one page rather than cut.
+  - **Free win**: OneNote's own handwriting OCR is already in the XML (387 `one:OCRText` blocks, 16,142 tokens on 46 pages). Carry it across rather than making Textify redo it.
+  - **COM is flaky at volume**: `0x800706BF` / `0x800706BE` appear intermittently. A 225 page import needs a retry loop that re-creates the COM object.
+  - **Mapping**: OneNote has notebook / section group / section / page; FlatNotes has only notebook / page. A OneNote section becomes one FlatNotes notebook named `Notebook / Section`, preserving the hierarchy in the name. Page titles are kept.
+  - **Geometry**: OneNote page positions are in points (1/72 inch) while ISF stroke coordinates are in a different device unit, so the importer must establish the conversion empirically per page rather than assume, and verify by comparing decoded stroke bounds against the element's declared position and size. OneNote pages are unbounded in height whereas FlatNotes pages are fixed, so a tall OneNote page splits across as many FlatNotes pages as needed, never scaling handwriting down to illegibility.
+  - **Highlighter strokes** map to the highlighter tool, normal strokes to the pen.
+  - **Typed text** (`one:Outline` / `one:OE` / `one:T`, HTML fragments) becomes text items with entities decoded and markup stripped.
+  - **Accepted losses, to be stated in the UI**: tables flatten to text, OneNote tags, audio and embedded file attachments are skipped, and `fitToCurve` smoothing is approximated by the existing ink smoothing.
+  - **Import must be non-destructive and resumable**: it only ever creates new FlatNotes notebooks, never touches existing ones, reports progress per page, and can be re-run.
+- US-022 Collections: a grouping level above notebooks, so the sidebar reads collection -> notebook -> pages. A collection is a named set of notebooks. In the sidebar each collection is a collapsible row with its notebooks indented beneath it, and **only one collection is expanded at a time** (opening one closes the others). Notebooks that belong to no collection stay listed at the top level rather than being forced into a catch-all.
+  - Data: a notebook gains an optional `collection` id. Collections themselves (id, name, order) live alongside the existing `kv` settings rather than becoming a third entity with its own lifecycle, and a notebook whose collection no longer exists falls back to ungrouped instead of vanishing.
+  - Operations: create, rename and delete a collection, and move a notebook into or out of one. **Deleting a collection never deletes notebooks**, it only ungroups them, and this must be obvious in the UI.
+  - The expanded collection and its scroll position persist across restarts, since one of these collections has 175 pages in it.
+  - **Migration of the OneNote import**: the 37 imported notebooks are named `Notebook / Section`, which was a workaround for having no grouping level. On upgrade, split those names on the first ` / `, create one collection per OneNote notebook and rename each notebook to just its section. This restores the original OneNote hierarchy exactly and must be idempotent, so running it twice does not create duplicate collections or re-split a name that has already been split.
+  - The OneNote importer (US-021) should from now on write `collection` directly instead of composing a `Notebook / Section` name.
+
+- US-023 Continuous pages: a page has no fixed bottom. It is as tall as its own content plus a blank tail of about half a sheet, so there is always somewhere below the last stroke to keep writing, and writing into that tail grows the page again. This is the OneNote model: a notebook holds named pages, and each page is unbounded downwards.
+  - Growth happens **during** a stroke, not only when it is committed, or a stroke started in the tail flattens against an edge that is about to move anyway. Heights move in fixed steps so a stroke running down the page does not resize the world on every point.
+  - Shrinking is reluctant: a page never goes below one sheet, only shrinks once it is more than a step and a half too tall, and never while it is the page being drawn on, so erasing the last line does not yank the page out from under the pen.
+  - Pages are **named**: new ones are numbered until named, the name is editable from the sidebar, and it appears in the sidebar, the page indicator and export filenames. OneNote titles become names on import.
+  - Rendering must not degrade with height: a page is cut into bands of one sheet, only visible bands are rastered, and cached pixels are capped with least-recently-used eviction. Band boundaries must be invisible on every paper colour, which rules out both overlapping bands (highlighter multiplies twice) and naive tiling (hairline gaps, and a shadow edge inside every boundary).
+  - Exports paginate on content, never on the blank tail: PDF cuts a tall page into sheets, PNG keeps it whole and drops the scale instead.
+  - **The importer stops slicing**, and the notebooks already imported are rejoined in place. The rejoin has to be derived from what was actually stored, since the slice index was not kept: the title is on the first sheet only, so an untitled page is a continuation. That rule must be verified against the real data before anything is rewritten, the join must be recorded so it can be traced, and a second run must do nothing.
+  - A rejoin restores the content but not the exact geometry, because the old slicer discarded the empty runs it collapsed: measured at up to 667 px of displacement per seam against a fresh export, while never-sliced pages matched exactly. **Where OneNote is still installed, re-import rather than rejoin.** The swap must be safe: import first (strictly additive), pair every old notebook to its replacement by OneNote section id, refuse to delete anything unless every pair exists and the replacement holds at least as many items and strokes.
+
+- US-024 How pages are shown is the reader's choice, in Settings → Pages and remembered across restarts.
+  - **Page view**: *continuous*, the strip of pages one after another, or *one page*, only the page in focus with nothing above or below it. One page turns by scrolling or dragging past either end of the sheet, by `PageUp` / `PageDown`, or from the sidebar.
+  - Single-page view must not fork the geometry. It is the same world strip, drawn one sheet at a time with the camera fenced inside that sheet, so the page in focus stays derived from where the viewport centre is and no second source of truth can drift from it. The fence has to be re-seated wherever the page list itself changes (add, delete, duplicate, undo of any of them, opening a notebook), or a page removed above the camera leaves it fenced to a page nobody asked for.
+  - A page that is not on screen cannot take ink, be erased or be selected, however far the view is zoomed out.
+  - **Page list**: the sidebar lists pages as *big* previews two to a row, *small* previews three to a row, or a plain *list* of numbers and names with no previews, which is what a notebook of a couple of hundred pages wants. All three keep the same rows in page order, the same selection and the same right-click menu.
+
+## Non-goals (v1)
+
+- Cloud sync, collaboration, PDF import/annotation, audio recording. Pages grow downwards (US-023) but the canvas is not infinite sideways: page width is fixed.
+
+## Verification
+
+Each iteration is tested live in Chrome (chrome-devtools MCP): screenshots for visual QA, synthetic `PointerEvent`s with `pointerType:'pen'` + pressure ramps for ink QA, `buttons:32` for eraser-end QA, console/network checks for errors.

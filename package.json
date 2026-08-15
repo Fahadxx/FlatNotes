@@ -1,0 +1,39 @@
+{
+  "name": "flatnotes",
+  "productName": "FlatNotes",
+  "version": "1.0.0",
+  "description": "Smooth pen-first notes for Windows",
+  "main": "electron/main.cjs",
+  "author": "Fahad",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.fahad.flatnotes",
+    "productName": "FlatNotes",
+    "files": [
+      "app/**/*",
+      "electron/**/*",
+      "build/icon.png"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "build/icon.png"
+    },
+    "portable": {
+      "artifactName": "FlatNotes.exe"
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    }
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  }
+}

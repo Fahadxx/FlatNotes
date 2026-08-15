@@ -1,0 +1,23 @@
+node_modules/
+dist/
+
+# Your notes never live here. The app writes every document, the window state and the
+# OneNote import staging area to Electron's userData directory (%APPDATA%\FlatNotes), and
+# the OCR/ASR engines and their models to %LOCALAPPDATA%\FlatNotes. Nothing below is data
+# in that sense; these are build outputs and test artefacts that land inside the checkout
+# and would otherwise be committed by accident.
+
+# compiled OneNote COM helper: setup-onenote.ps1 can build it here for a dev run, and
+# electron/main.cjs looks for it at onenote/bin before the installed copy
+onenote/bin/
+onenote/obj/
+
+# engine logs, self-test output and headless-eval dumps
+*.log
+*.out.json
+selftest-*.json
+selftest-*.png
+
+# packed archives and the rollback copy update-app.ps1 leaves behind
+*.asar
+*.asar.bak
