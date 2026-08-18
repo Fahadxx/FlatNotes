@@ -21,3 +21,30 @@ selftest-*.png
 # packed archives and the rollback copy update-app.ps1 leaves behind
 *.asar
 *.asar.bak
+
+# Python. The app itself ships no Python, but the README's browser mode runs
+# `python -m http.server` inside app/, and throwaway analysis or tooling scripts tend to
+# land in a checkout sooner or later. Note that `build/` is deliberately NOT ignored here,
+# unlike in a stock Python .gitignore: build/icon.png is a real tracked asset that
+# electron-builder needs.
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
